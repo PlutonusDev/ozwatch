@@ -31,7 +31,7 @@ export const useTrafficSimulation = () => {
     lastData: PilotData;
     lastUpdated: number;
     rates: { turnRate: number; climbRate: number; accelRate: number };
-    history: [number, number][];
+    history: any;
   }>>({});
 
   const [renderedTraffic, setRenderedTraffic] = useState<SimulatedPilot[]>([]);

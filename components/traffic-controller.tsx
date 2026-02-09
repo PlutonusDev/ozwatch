@@ -23,7 +23,7 @@ const textFetcher = (url: string) => fetch(url).then((res) => res.text());
 
 // --- 1. HTML GENERATORS (Updated with IDs) ---
 
-const createPlaneIconHTML = (heading: number, color: string, showPulse: boolean, alertText: string | null, isSelected: boolean) => {
+const createPlaneIconHTML = (heading: number, color: string, showPulse: boolean, alertText: string | null, isSelected: boolean, acarsOnline: boolean, acarsFlash: boolean) => {
   // 1. Conditional Pulse
   const selectionRing = isSelected ?
     `<div style="position: absolute; width: 24px; height: 24px; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 10px rgba(255,255,255,0.5);"></div>` : '';
@@ -38,8 +38,12 @@ const createPlaneIconHTML = (heading: number, color: string, showPulse: boolean,
     : '';
 
   // 3. Wrapper Class for Flash Animation
-  // If alertText exists, we assume a flash event is happening
-  const wrapperClass = alertText ? 'plane-wrapper flash-alert' : 'plane-wrapper';
+  const wrapperClass = acarsFlash ? 'plane-wrapper acars-flash-alert' : (alertText ? 'plane-wrapper flash-alert' : 'plane-wrapper');
+
+  // 4. ACARS Online Tag
+  const acarsTag = acarsOnline
+    ? `<div class="absolute text-green-500 font-bold text-xl -top-1 left-6 acars-tag">*</div>`
+    : '';
 
   return `
     <div style="position: relative; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">
@@ -52,6 +56,7 @@ const createPlaneIconHTML = (heading: number, color: string, showPulse: boolean,
           <path d="M12 2L2 22L12 18L22 22L12 2Z" />
         </svg>
       </div>
+      ${acarsTag}
     </div>
   `;
 };
@@ -164,11 +169,19 @@ const createAirwayLabelIcon = (text: string, bearing: number) => {
   });
 };
 
+import type { AcarsMessage } from './hoppie-panel';
+import type { AircraftEntry } from './aircraft-list';
+
 interface TrafficControllerProps {
   layers: Record<string, boolean>;
+  acarsOnline: string[];
+  acarsMessages: AcarsMessage[];
+  onPilotCallsignsUpdate: (callsigns: string[]) => void;
+  onSectorTrafficUpdate: (traffic: AircraftEntry[]) => void;
+  focusCid: number | null;
 }
 
-export default function TrafficController({ layers }: TrafficControllerProps) {
+export default function TrafficController({ layers, acarsOnline, acarsMessages, onPilotCallsignsUpdate, onSectorTrafficUpdate, focusCid }: TrafficControllerProps) {
   const map = useMap();
 
   // 1. Data References
@@ -193,6 +206,12 @@ export default function TrafficController({ layers }: TrafficControllerProps) {
   const sectorFeatureMap = useRef<Record<string, any>>({});
   const [isMapReady, setIsMapReady] = useState(false);
 
+  // 4. ACARS State
+  const acarsOnlineRef = useRef<Set<string>>(new Set());
+  const acarsFlashRef = useRef<Set<string>>(new Set());
+  const acarsFlashTimers = useRef<Record<string, NodeJS.Timeout>>({});
+  const lastMessageCount = useRef<number>(0);
+
   // --- DATA LOADING ---
 
   const { data: trafficData } = useSWR('/api/traffic', fetcher, {
@@ -213,6 +232,53 @@ export default function TrafficController({ layers }: TrafficControllerProps) {
     const timer = setTimeout(() => setIsMapReady(true), 3000);
     return () => clearTimeout(timer);
   }, []);
+
+  // Sync ACARS online ref
+  useEffect(() => {
+    acarsOnlineRef.current = new Set(acarsOnline);
+  }, [acarsOnline]);
+
+  // Handle ACARS message flash
+  useEffect(() => {
+    const incomingMsgs = acarsMessages.filter(m => m.direction === 'in');
+    if (incomingMsgs.length > lastMessageCount.current) {
+      // New messages arrived - flash the aircraft
+      const newMsgs = incomingMsgs.slice(0, incomingMsgs.length - lastMessageCount.current);
+      newMsgs.forEach(msg => {
+        const cs = msg.from;
+        acarsFlashRef.current.add(cs);
+        // Clear existing timer
+        if (acarsFlashTimers.current[cs]) clearTimeout(acarsFlashTimers.current[cs]);
+        // Auto-clear flash after 10s
+        acarsFlashTimers.current[cs] = setTimeout(() => {
+          acarsFlashRef.current.delete(cs);
+          delete acarsFlashTimers.current[cs];
+        }, 10000);
+      });
+    }
+    lastMessageCount.current = incomingMsgs.length;
+  }, [acarsMessages]);
+
+  // Focus on aircraft from list click
+  useEffect(() => {
+    if (focusCid !== null) {
+      const marker = markersRef.current[focusCid];
+      if (marker) {
+        map.setView(marker.getLatLng(), Math.max(map.getZoom(), 7), { animate: true });
+        selectedCidRef.current = focusCid;
+        setSelectedCid(focusCid);
+        drawRouteForPilot(focusCid);
+      }
+    }
+  }, [focusCid]);
+
+  // Report pilot callsigns to parent
+  useEffect(() => {
+    if (trafficData?.pilots) {
+      const callsigns = trafficData.pilots.map((p: any) => p.callsign);
+      onPilotCallsignsUpdate(callsigns);
+    }
+  }, [trafficData, onPilotCallsignsUpdate]);
 
   const { data: airspaceText } = useSWR('/airspace.xml', textFetcher, {
     revalidateOnFocus: false
@@ -451,11 +517,13 @@ export default function TrafficController({ layers }: TrafficControllerProps) {
       let marker = markersRef.current[cid];
       let polyline = tracksRef.current[cid];
       const isSelected = selectedCid === cid;
+      const isAcarsOnline = acarsOnlineRef.current.has(pilot.callsign);
+      const isAcarsFlash = acarsFlashRef.current.has(pilot.callsign);
 
       if (!marker) {
         const icon = L.divIcon({
           className: 'plane-icon-container',
-          html: createPlaneIconHTML(pilot.heading, status.color, false, null, isSelected),
+          html: createPlaneIconHTML(pilot.heading, status.color, false, null, isSelected, isAcarsOnline, isAcarsFlash),
           iconSize: [32, 32], iconAnchor: [16, 16],
         });
         
@@ -499,7 +567,7 @@ export default function TrafficController({ layers }: TrafficControllerProps) {
         });
       } else {
         // Update Marker State
-        const html = createPlaneIconHTML(pilot.heading, status.color, false, null, isSelected);
+        const html = createPlaneIconHTML(pilot.heading, status.color, false, null, isSelected, isAcarsOnline, isAcarsFlash);
         const currentIcon = marker.options.icon as L.DivIcon;
         if (currentIcon.options.html !== html) {
              marker.setIcon(L.divIcon({ className: 'plane-icon-container', html, iconSize: [32, 32], iconAnchor: [16, 16] }));
@@ -529,8 +597,40 @@ export default function TrafficController({ layers }: TrafficControllerProps) {
         }
       }
     });
+
+    // Report sector traffic to parent
+    if (activeFeatures.length > 0) {
+      const trafficEntries: AircraftEntry[] = [];
+      Object.entries(pilotRegistry.current).forEach(([cidKey, entry]: [string, any]) => {
+        const st = entry.status;
+        if (st && (st.state === 'inside' || st.state === 'entering' || st.state === 'leaving' || st.state === 'transition')) {
+          const pilot = entry.lastData;
+          // Calculate distance to sector boundary
+          let distNm: number | null = null;
+          if (st.minutesUntilEvent && pilot.groundspeed > 0) {
+            // distance = speed * time; speed in kts, time in minutes
+            distNm = Math.round((pilot.groundspeed / 60) * st.minutesUntilEvent);
+          }
+          trafficEntries.push({
+            callsign: pilot.callsign,
+            cid: Number(cidKey),
+            state: st.state,
+            sectorName: st.activeSector || '',
+            secondarySector: st.secondarySector || '',
+            minutesUntilEvent: st.minutesUntilEvent,
+            distanceNm: distNm,
+            altitude: pilot.altitude,
+            groundspeed: pilot.groundspeed,
+            acarsOnline: acarsOnlineRef.current.has(pilot.callsign)
+          });
+        }
+      });
+      onSectorTrafficUpdate(trafficEntries);
+    } else {
+      onSectorTrafficUpdate([]);
+    }
     
-  }, [trafficData, selectedSectorIds, selectedCid]);
+  }, [trafficData, selectedSectorIds, selectedCid, acarsOnline]);
 
   useEffect(() => {
     const animate = () => {

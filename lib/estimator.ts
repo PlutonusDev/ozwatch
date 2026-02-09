@@ -211,7 +211,7 @@ export const getPilotStatus = (
 export const getGreatCircleRoute = (
   start: [number, number], 
   end: [number, number]
-): [number, number][] => {
+): any => {
   const startPt = turf.point([start[1], start[0]]); // Turf uses [Lon, Lat]
   const endPt = turf.point([end[1], end[0]]);
   
